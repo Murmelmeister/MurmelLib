@@ -467,6 +467,16 @@ public final class Database {
     }
 
     /**
+     * Executes the given SQL update statement.
+     *
+     * @param sql The SQL statement to execute, typically an update, insert, or delete statement
+     * @return The number of rows affected by the SQL statement
+     */
+    public int update(String sql) {
+        return update(sql, null);
+    }
+
+    /**
      * Executes the given SQL update statement within a transaction and retrieves the generated key for the updated record.
      *
      * @param sql        The SQL update statement to be executed
@@ -533,7 +543,7 @@ public final class Database {
             throw new DatabaseException("Invalid table name: " + name);
 
         String sql = "CREATE TABLE IF NOT EXISTS " + name + "(" + columns + ")";
-        return update(sql, null);
+        return update(sql);
     }
 
     /**

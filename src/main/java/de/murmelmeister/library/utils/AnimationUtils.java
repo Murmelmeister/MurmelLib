@@ -8,23 +8,41 @@ import java.util.List;
  * color codes, and a floating-point speed multiplier that influences the animation state.
  */
 public final class AnimationUtils {
-    private static final double NANOS_PER_SECOND = 1_000_000_000D;
+    private static final double NANOS_PER_TICK = 50_000_000D; // 1 / 20 seconds
 
     private AnimationUtils() {
     }
 
     /**
-     * Converts the supplied speed multiplier into a phase using the current system time as the base.
-     * The phase increases continuously over time, ensuring deterministic animation steps driven by
-     * the supplied speed factor alone.
+     * Converts the supplied speed multiplier into a phase using the current system time expressed
+     * in Minecraft ticks as the base. The phase increases (or decreases) continuously over time,
+     * ensuring deterministic animation steps driven by the supplied speed factor alone.
      *
      * @param speed The speed multiplier; positive values move the animation forward over time,
-     *              negative values move it in reverse. The value is interpreted as cycles per second.
-     * @return The current phase value for the animation
+     *              negative values move it in reverse. A value of {@code 1.0f} corresponds to
+     *              the base Minecraft tick rate (20 ticks per second).
+     * @return The current phase value for the bounce animation
      */
-    private static double currentPhase(float speed) {
-        double seconds = System.nanoTime() / NANOS_PER_SECOND;
-        return seconds * speed;
+    private static double bouncePhase(float speed) {
+        double ticks = System.nanoTime() / NANOS_PER_TICK;
+        return ticks * speed;
+    }
+
+    /**
+     * Converts the supplied speed multiplier into a phase for color animations. The value represents
+     * how many color steps have elapsed with {@code 1.0f} equating to 20 ticks (one second) per step.
+     *
+     * @param speed The speed multiplier. Values greater than 1 speed up the cycle (fewer ticks per step),
+     *              values between 0 and 1 slow it down (more ticks per step), and negative values reverse it.
+     * @return The current phase value for color animations
+     */
+    private static double colorPhase(float speed) {
+        double ticks = System.nanoTime() / NANOS_PER_TICK;
+        if (speed == 0F) return 0D;
+        double absSpeed = Math.abs(speed);
+        double ticksPerStep = 20D / absSpeed; // 1.0f -> 20 ticks, 2.0f -> 10 ticks, 0.5f -> 40 ticks
+        double phase = ticks / ticksPerStep;
+        return speed > 0 ? phase : -phase;
     }
 
     /**
@@ -33,7 +51,7 @@ public final class AnimationUtils {
      * accelerated or slowed down via the {@code speed} multiplier.
      *
      * @param input The input strings to be animated; if null, the method returns null
-     * @param speed The speed multiplier measured in cycles per second; values greater than 1 speed up
+     * @param speed The speed multiplier measured against the game tick rate; values greater than 1 speed up
      *              the animation, values between 0 and 1 slow it down, and negative values reverse it
      * @return A substring of the input, adjusted according to the bounce animation logic;
      * if the input is null or its length is zero, the method returns the input as is
@@ -44,7 +62,7 @@ public final class AnimationUtils {
         if (length == 0) return input;
 
         double cycle = length * 2.0;
-        double index = currentPhase(speed) % cycle;
+        double index = bouncePhase(speed) % cycle;
         if (index < 0) index += cycle;
 
         double distance = (index <= length)
@@ -64,8 +82,9 @@ public final class AnimationUtils {
      *
      * @param colors A list of color codes to select from; must not be null or empty
      * @param input  The input strings to be animated; if null, the method returns null
-     * @param speed  A speed multiplier measured in cycles per second; values greater than 1 advance
-     *               through the colors faster, while values between 0 and 1 slow it down
+     * @param speed  A speed multiplier measured against the game tick rate; {@code 1.0f} advances the color
+     *               once every 20 ticks (one second), {@code 2.0f} every 10 ticks, {@code 0.5f} every 40 ticks,
+     *               and negative values reverse the direction
      * @return The input string prefixed with the selected color code, or the input as is
      * if colors are null, empty, or input is null
      */
@@ -73,9 +92,9 @@ public final class AnimationUtils {
         if (colors == null || colors.isEmpty() || input == null) return input;
 
         int size = colors.size();
-        double phase = currentPhase(speed);
-        long scaled = (long) Math.floor(phase);
-        int idx = Math.floorMod(scaled, size);
+        double phase = colorPhase(speed);
+        long stepIndex = (long) Math.floor(phase);
+        int idx = Math.floorMod(stepIndex, size);
 
         return colors.get(idx) + input;
     }
@@ -89,8 +108,9 @@ public final class AnimationUtils {
      *               is assigned cyclically to the characters in the input string.
      * @param input  The input strings to be animated; if null, the method returns null.
      *               If the color list is null or empty, the input string is returned as is.
-     * @param speed  A speed multiplier measured in cycles per second; values greater than 1 advance
-     *               through the colors faster, while values between 0 and 1 slow it down
+     * @param speed  A speed multiplier measured against the game tick rate; {@code 1.0f} advances one step
+     *               every 20 ticks, {@code 2.0f} every 10 ticks, {@code 0.5f} every 40 ticks, and negative
+     *               values reverse the direction
      * @return The input string with each character prefixed by a cyclically assigned color code
      * from the list. If colors are null, empty, or input is null, the method returns the
      * input string unmodified.
@@ -99,12 +119,12 @@ public final class AnimationUtils {
         if (colors == null || colors.isEmpty() || input == null) return input;
         StringBuilder sb = new StringBuilder();
         int size = colors.size();
-        double basePhase = currentPhase(speed);
+        double basePhase = colorPhase(speed);
 
         for (int i = 0; i < input.length(); i++) {
             double phase = basePhase + i;
-            long scaled = (long) Math.floor(phase);
-            int colorIndex = Math.floorMod(scaled, size);
+            long stepIndex = (long) Math.floor(phase);
+            int colorIndex = Math.floorMod(stepIndex, size);
             String color = colors.get(colorIndex);
             sb.append(color).append(input.charAt(i));
         }
@@ -123,9 +143,10 @@ public final class AnimationUtils {
      * @param input  The input strings to be animated; if null, the method returns null.
      *               If the color list is null or empty, the input string is returned after
      *               the bounce effect is applied.
-     * @param speed  A speed multiplier measured in cycles per second, influencing
-     *               the results of both the bounce and color effects; values greater than 1 speed up
-     *               the combined animation, while values between 0 and 1 slow it down
+     * @param speed  A speed multiplier measured against the game tick rate, influencing
+     *               the results of both the bounce and color effects; {@code 1.0f} advances once every
+     *               20 ticks, {@code 2.0f} every 10 ticks, {@code 0.5f} every 40 ticks, and negative values
+     *               reverse the direction
      * @return An animated string with a "bounce" effect followed by cyclically applied color codes.
      * If the input is null, the method returns null. If the color list is null or empty,
      * the method returns the string with only the bounce effect applied.

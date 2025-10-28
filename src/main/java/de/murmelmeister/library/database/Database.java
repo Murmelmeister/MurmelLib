@@ -533,8 +533,7 @@ public final class Database {
             throw new DatabaseException("Invalid table name: " + name);
 
         String sql = "CREATE TABLE IF NOT EXISTS " + name + "(" + columns + ")";
-        return update(sql, statement -> {
-        });
+        return update(sql, null);
     }
 
     /**
@@ -622,7 +621,8 @@ public final class Database {
      */
     private CallableStatement getCallableStatement(Connection connection, String sql, ParameterProcessor parameters) throws SQLException {
         CallableStatement statement = connection.prepareCall(sql);
-        parameters.execute(statement);
+        if (parameters != null)
+            parameters.execute(statement);
         return statement;
     }
 
@@ -638,7 +638,8 @@ public final class Database {
      */
     private PreparedStatement getBatchStatement(Connection connection, String sql, ParameterProcessor parameters) throws SQLException {
         PreparedStatement statement = connection.prepareStatement(sql);
-        parameters.execute(statement);
+        if (parameters != null)
+            parameters.execute(statement);
         return statement;
     }
 
@@ -651,14 +652,14 @@ public final class Database {
      * @param sql        The SQL query string to prepare the {@link PreparedStatement} with.
      *                   Must not be null or empty.
      * @param parameters An operation defining how to set parameters and operate on the {@link PreparedStatement}.
-     *                   Must not be null and should properly handle the {@link PreparedStatement}.
      * @return The prepared and parameterized {@link PreparedStatement} ready for execution,
      * configured to return generated keys.
      * @throws SQLException If an error occurs while preparing or handling the {@link PreparedStatement}.
      */
     private PreparedStatement getGeneratedKeysStatement(Connection connection, String sql, ParameterProcessor parameters) throws SQLException {
         PreparedStatement statement = connection.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS);
-        parameters.execute(statement);
+        if (parameters != null)
+            parameters.execute(statement);
         return statement;
     }
 
@@ -671,13 +672,13 @@ public final class Database {
      * @param sql        The SQL query string to prepare the {@link PreparedStatement} with.
      *                   Must not be null or empty.
      * @param parameters An operation defining how to set parameters and execute the {@link PreparedStatement}.
-     *                   Must not be null and should properly handle the {@link PreparedStatement}.
      * @return The prepared and parameterized {@link PreparedStatement} ready for execution.
      * @throws SQLException If an error occurs while preparing or handling the {@link PreparedStatement}.
      */
     private PreparedStatement getPreparedStatement(Connection connection, String sql, ParameterProcessor parameters) throws SQLException {
         PreparedStatement statement = connection.prepareStatement(sql);
-        parameters.execute(statement);
+        if (parameters != null)
+            parameters.execute(statement);
         return statement;
     }
 

@@ -8,10 +8,8 @@ import org.slf4j.LoggerFactory;
 
 import java.sql.*;
 import java.util.*;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.regex.Pattern;
@@ -22,15 +20,19 @@ import java.util.regex.Pattern;
  * The class ensures that all database operations are performed within a transaction context, allowing for
  * rollback in case of errors.
  */
-public final class Database {
+public final class Database implements AutoCloseable {
     private static final long SLOW_QUERY_THRESHOLD_MS = 500;
     private static final int EXECUTOR_POOL_SIZE = 10;
+    private static final Pattern NAME_PATTERN = Pattern.compile("[A-Za-z0-9_]+");
+    private static final ThreadFactory WORKER_THREAD_FACTORY = new DaemonThreadFactory("database-worker-");
+    private static final ThreadFactory NETWORK_TIMEOUT_THREAD_FACTORY = new DaemonThreadFactory("database-network-timeout-");
 
     private final Logger logger = LoggerFactory.getLogger(Database.class);
     private final ReadWriteLock lock = new ReentrantReadWriteLock(true);
-    private volatile ExecutorService executor = createExecutor();
+    private volatile ExecutorService executor;
+    private volatile ExecutorService networkTimeoutExecutor;
     private volatile HikariDataSource dataSource;
-    private static final Pattern NAME_PATTERN = Pattern.compile("[A-Za-z0-9_]+");
+    private volatile Integer transactionIsolationLevel;
 
     /**
      * Establishes a database connection using the provided HikariConfig. Configures and initializes
@@ -57,9 +59,18 @@ public final class Database {
             if (executor == null || executor.isShutdown())
                 executor = createExecutor();
 
+            if (networkTimeoutExecutor == null || networkTimeoutExecutor.isShutdown())
+                networkTimeoutExecutor = createNetworkTimeoutExecutor();
+
             dataSource = new HikariDataSource(config);
             logger.info("Database connection established successfully. URL: {}", dataSource.getJdbcUrl());
         } catch (Exception e) {
+            shutdownExecutor(executor);
+            executor = null;
+            shutdownExecutor(networkTimeoutExecutor);
+            networkTimeoutExecutor = null;
+            closeDataSourceQuietly(dataSource);
+            dataSource = null;
             throw new DatabaseException("Failed to connect to the database", e);
         } finally {
             lock.writeLock().unlock();
@@ -112,6 +123,17 @@ public final class Database {
     }
 
     /**
+     * Configures the transaction isolation level used for all managed transactions.
+     * A {@code null} value restores the driver's default isolation level.
+     *
+     * @param isolationLevel The desired isolation level, typically one of the {@link Connection}
+     *                       {@code TRANSACTION_*} constants, or {@code null} to use the default.
+     */
+    public void setTransactionIsolationLevel(Integer isolationLevel) {
+        transactionIsolationLevel = isolationLevel;
+    }
+
+    /**
      * Closes the database connection and releases associated resources.
      * This method ensures proper cleanup of the database connection, thread pool,
      * and other associated components. It also manages concurrency with a write lock.
@@ -130,6 +152,7 @@ public final class Database {
     public void disconnect() {
         HikariDataSource dataSourceToClose;
         ExecutorService executorToShutdown;
+        ExecutorService networkExecutorToShutdown;
 
         try {
             if (!lock.writeLock().tryLock(10, TimeUnit.SECONDS))
@@ -144,20 +167,14 @@ public final class Database {
             dataSource = null;
             executorToShutdown = executor;
             executor = null;
+            networkExecutorToShutdown = networkTimeoutExecutor;
+            networkTimeoutExecutor = null;
         } finally {
             lock.writeLock().unlock();
         }
 
-        if (executorToShutdown != null && !executorToShutdown.isShutdown()) {
-            executorToShutdown.shutdown();
-            try {
-                if (!executorToShutdown.awaitTermination(10, TimeUnit.SECONDS))
-                    executorToShutdown.shutdownNow();
-            } catch (InterruptedException e) {
-                executorToShutdown.shutdownNow();
-                Thread.currentThread().interrupt();
-            }
-        }
+        shutdownExecutor(executorToShutdown);
+        shutdownExecutor(networkExecutorToShutdown);
 
         if (dataSourceToClose != null) {
             try {
@@ -168,6 +185,11 @@ public final class Database {
                 throw new DatabaseException("Failed to close the database connection", e);
             }
         }
+    }
+
+    @Override
+    public void close() {
+        disconnect();
     }
 
     /**
@@ -473,7 +495,7 @@ public final class Database {
      * @return The number of rows affected by the SQL statement
      */
     public int update(String sql) {
-        return update(sql, null);
+        return update(sql, ParameterProcessor.noop());
     }
 
     /**
@@ -561,22 +583,28 @@ public final class Database {
         Connection connection = null;
         boolean previousAutoCommit = true;
         int previousIsolation = Connection.TRANSACTION_READ_COMMITTED;
-        ExecutorService networkExecutor = requireExecutor();
+        boolean previousReadOnly = false;
+        ExecutorService timeoutExecutor = requireNetworkTimeoutExecutor();
         HikariDataSource currentDataSource = requireDataSource();
+        Integer desiredIsolation = transactionIsolationLevel;
+        if (desiredIsolation != null && !isKnownIsolationLevel(desiredIsolation))
+            throw new DatabaseException("Unsupported transaction isolation level: " + desiredIsolation);
 
         try {
             connection = currentDataSource.getConnection();
 
             previousAutoCommit = connection.getAutoCommit();
             previousIsolation = connection.getTransactionIsolation();
+            previousReadOnly = connection.isReadOnly();
 
-            if (previousAutoCommit) connection.setAutoCommit(false);
-            int desiredIsolation = Connection.TRANSACTION_SERIALIZABLE;
-            if (previousIsolation != desiredIsolation)
+            if (previousAutoCommit)
+                connection.setAutoCommit(false);
+
+            if (desiredIsolation != null && previousIsolation != desiredIsolation)
                 connection.setTransactionIsolation(desiredIsolation);
 
             connection.setReadOnly(false);
-            connection.setNetworkTimeout(networkExecutor, 30_000); // Set network timeout to 30 seconds
+            connection.setNetworkTimeout(timeoutExecutor, 30_000); // Set network timeout to 30 seconds
 
             T result = operation.execute(connection);
             connection.commit();
@@ -604,8 +632,8 @@ public final class Database {
                     if (connection.getTransactionIsolation() != previousIsolation)
                         connection.setTransactionIsolation(previousIsolation);
 
-                    connection.setReadOnly(false);
-                    connection.setNetworkTimeout(networkExecutor, 0);
+                    connection.setReadOnly(previousReadOnly);
+                    connection.setNetworkTimeout(timeoutExecutor, 0);
                 } catch (SQLException e) {
                     logger.error("Failed to restore connection state", e);
                 } finally {
@@ -631,8 +659,7 @@ public final class Database {
      */
     private CallableStatement getCallableStatement(Connection connection, String sql, ParameterProcessor parameters) throws SQLException {
         CallableStatement statement = connection.prepareCall(sql);
-        if (parameters != null)
-            parameters.execute(statement);
+        ParameterProcessor.of(parameters).execute(statement);
         return statement;
     }
 
@@ -648,8 +675,7 @@ public final class Database {
      */
     private PreparedStatement getBatchStatement(Connection connection, String sql, ParameterProcessor parameters) throws SQLException {
         PreparedStatement statement = connection.prepareStatement(sql);
-        if (parameters != null)
-            parameters.execute(statement);
+        ParameterProcessor.of(parameters).execute(statement);
         return statement;
     }
 
@@ -668,8 +694,7 @@ public final class Database {
      */
     private PreparedStatement getGeneratedKeysStatement(Connection connection, String sql, ParameterProcessor parameters) throws SQLException {
         PreparedStatement statement = connection.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS);
-        if (parameters != null)
-            parameters.execute(statement);
+        ParameterProcessor.of(parameters).execute(statement);
         return statement;
     }
 
@@ -687,8 +712,7 @@ public final class Database {
      */
     private PreparedStatement getPreparedStatement(Connection connection, String sql, ParameterProcessor parameters) throws SQLException {
         PreparedStatement statement = connection.prepareStatement(sql);
-        if (parameters != null)
-            parameters.execute(statement);
+        ParameterProcessor.of(parameters).execute(statement);
         return statement;
     }
 
@@ -698,7 +722,16 @@ public final class Database {
      * @return An instance of ExecutorService configured with a fixed thread pool
      */
     private ExecutorService createExecutor() {
-        return Executors.newFixedThreadPool(EXECUTOR_POOL_SIZE);
+        return Executors.newFixedThreadPool(EXECUTOR_POOL_SIZE, WORKER_THREAD_FACTORY);
+    }
+
+    /**
+     * Creates the executor used for JDBC network timeout callbacks.
+     *
+     * @return An executor service dedicated to network timeout tasks
+     */
+    private ExecutorService createNetworkTimeoutExecutor() {
+        return Executors.newCachedThreadPool(NETWORK_TIMEOUT_THREAD_FACTORY);
     }
 
     /**
@@ -711,6 +744,19 @@ public final class Database {
      */
     private ExecutorService requireExecutor() {
         ExecutorService currentExecutor = executor;
+        if (currentExecutor == null || currentExecutor.isShutdown())
+            throw new DatabaseException("Database is not connected");
+        return currentExecutor;
+    }
+
+    /**
+     * Ensures that an active executor for network timeout callbacks is available.
+     *
+     * @return The executor dedicated to network timeout tasks
+     * @throws DatabaseException If the executor is unavailable
+     */
+    private ExecutorService requireNetworkTimeoutExecutor() {
+        ExecutorService currentExecutor = networkTimeoutExecutor;
         if (currentExecutor == null || currentExecutor.isShutdown())
             throw new DatabaseException("Database is not connected");
         return currentExecutor;
@@ -730,6 +776,14 @@ public final class Database {
         return currentDataSource;
     }
 
+    private boolean isKnownIsolationLevel(int isolationLevel) {
+        return isolationLevel == Connection.TRANSACTION_NONE
+                || isolationLevel == Connection.TRANSACTION_READ_UNCOMMITTED
+                || isolationLevel == Connection.TRANSACTION_READ_COMMITTED
+                || isolationLevel == Connection.TRANSACTION_REPEATABLE_READ
+                || isolationLevel == Connection.TRANSACTION_SERIALIZABLE;
+    }
+
     /**
      * Logs a warning if a database query took longer than the defined slow query threshold.
      *
@@ -740,6 +794,48 @@ public final class Database {
         long durationMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startTime);
         if (durationMs > SLOW_QUERY_THRESHOLD_MS)
             logger.warn("Slow database query [{}] executed in {} ms", sql, durationMs);
+    }
+
+    private void shutdownExecutor(ExecutorService executorService) {
+        if (executorService == null || executorService.isShutdown())
+            return;
+
+        executorService.shutdown();
+        try {
+            if (!executorService.awaitTermination(10, TimeUnit.SECONDS))
+                executorService.shutdownNow();
+        } catch (InterruptedException e) {
+            executorService.shutdownNow();
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    private void closeDataSourceQuietly(HikariDataSource source) {
+        if (source == null)
+            return;
+
+        try {
+            if (!source.isClosed())
+                source.close();
+        } catch (Exception e) {
+            logger.warn("Failed to close data source", e);
+        }
+    }
+
+    private static final class DaemonThreadFactory implements ThreadFactory {
+        private final String namePrefix;
+        private final AtomicInteger counter = new AtomicInteger();
+
+        private DaemonThreadFactory(String namePrefix) {
+            this.namePrefix = namePrefix;
+        }
+
+        @Override
+        public Thread newThread(Runnable runnable) {
+            Thread thread = new Thread(runnable, namePrefix + counter.incrementAndGet());
+            thread.setDaemon(true);
+            return thread;
+        }
     }
 
     /**

@@ -301,7 +301,7 @@ public final class Database {
      */
     public <T> List<T> queryListCallable(String sql, ResultSetProcessor<T> processor, ParameterProcessor parameters) {
         long startTime = System.nanoTime();
-        try (Connection connection = dataSource.getConnection();
+        try (Connection connection = requireDataSource().getConnection();
              CallableStatement statement = getCallableStatement(connection, sql, parameters);
              ResultSet resultSet = statement.executeQuery()) {
             List<T> results = new ArrayList<>();
@@ -357,7 +357,7 @@ public final class Database {
      */
     public boolean exists(String sql, ParameterProcessor parameters) {
         long startTime = System.nanoTime();
-        try (Connection connection = dataSource.getConnection();
+        try (Connection connection = requireDataSource().getConnection();
              PreparedStatement statement = getPreparedStatement(connection, sql, parameters);
              ResultSet resultSet = statement.executeQuery()) {
             return resultSet.next();
@@ -379,7 +379,7 @@ public final class Database {
      */
     public boolean existsCallable(String sql, ParameterProcessor parameters) {
         long startTime = System.nanoTime();
-        try (Connection connection = dataSource.getConnection();
+        try (Connection connection = requireDataSource().getConnection();
              CallableStatement statement = getCallableStatement(connection, sql, parameters);
              ResultSet resultSet = statement.executeQuery()) {
             return resultSet.next();

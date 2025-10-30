@@ -187,6 +187,10 @@ public final class Database implements AutoCloseable {
         }
     }
 
+    /**
+     * Closes the database, releasing any pooled connections and shutting down internal executors.
+     * This method is equivalent to {@link #disconnect()} and allows usage with try-with-resources.
+     */
     @Override
     public void close() {
         disconnect();
@@ -776,6 +780,13 @@ public final class Database implements AutoCloseable {
         return currentDataSource;
     }
 
+    /**
+     * Checks whether the supplied isolation level value matches one of the JDBC {@link Connection}
+     * {@code TRANSACTION_*} constants.
+     *
+     * @param isolationLevel The isolation level to inspect
+     * @return {@code true} when the level is recognised, otherwise {@code false}
+     */
     private boolean isKnownIsolationLevel(int isolationLevel) {
         return isolationLevel == Connection.TRANSACTION_NONE
                 || isolationLevel == Connection.TRANSACTION_READ_UNCOMMITTED
@@ -796,6 +807,11 @@ public final class Database implements AutoCloseable {
             logger.warn("Slow database query [{}] executed in {} ms", sql, durationMs);
     }
 
+    /**
+     * Shuts down the provided executor, waiting briefly for tasks to finish and forcing termination if necessary.
+     *
+     * @param executorService The executor to shut down; may be {@code null}
+     */
     private void shutdownExecutor(ExecutorService executorService) {
         if (executorService == null || executorService.isShutdown())
             return;
@@ -810,6 +826,11 @@ public final class Database implements AutoCloseable {
         }
     }
 
+    /**
+     * Closes the given data source, logging but ignoring any exceptions.
+     *
+     * @param source The {@link HikariDataSource} to close; may be {@code null}
+     */
     private void closeDataSourceQuietly(HikariDataSource source) {
         if (source == null)
             return;
@@ -822,6 +843,9 @@ public final class Database implements AutoCloseable {
         }
     }
 
+    /**
+     * Thread factory that marks created threads as daemon threads and assigns a readable name.
+     */
     private static final class DaemonThreadFactory implements ThreadFactory {
         private final String namePrefix;
         private final AtomicInteger counter = new AtomicInteger();
@@ -830,6 +854,12 @@ public final class Database implements AutoCloseable {
             this.namePrefix = namePrefix;
         }
 
+        /**
+         * Creates a new daemon thread to run the supplied task.
+         *
+         * @param runnable The task that the thread should execute
+         * @return A configured daemon thread
+         */
         @Override
         public Thread newThread(Runnable runnable) {
             Thread thread = new Thread(runnable, namePrefix + counter.incrementAndGet());

@@ -130,7 +130,7 @@ public final class Database implements AutoCloseable {
      *                       {@code TRANSACTION_*} constants, or {@code null} to use the default.
      */
     public void setTransactionIsolationLevel(Integer isolationLevel) {
-        transactionIsolationLevel = isolationLevel;
+        transactionIsolationLevel = isolationLevel == null ? null : normalizeIsolationLevel(isolationLevel);
     }
 
     /**
@@ -591,8 +591,8 @@ public final class Database implements AutoCloseable {
         ExecutorService timeoutExecutor = requireNetworkTimeoutExecutor();
         HikariDataSource currentDataSource = requireDataSource();
         Integer desiredIsolation = transactionIsolationLevel;
-        if (desiredIsolation != null && !isKnownIsolationLevel(desiredIsolation))
-            throw new DatabaseException("Unsupported transaction isolation level: " + desiredIsolation);
+        if (desiredIsolation != null)
+            desiredIsolation = normalizeIsolationLevel(desiredIsolation);
 
         try {
             connection = currentDataSource.getConnection();
@@ -781,18 +781,19 @@ public final class Database implements AutoCloseable {
     }
 
     /**
-     * Checks whether the supplied isolation level value matches one of the JDBC {@link Connection}
-     * {@code TRANSACTION_*} constants.
+     * Validates and returns the supplied isolation level if it matches one of the JDBC constants.
      *
-     * @param isolationLevel The isolation level to inspect
-     * @return {@code true} when the level is recognised, otherwise {@code false}
+     * @param isolationLevel The isolation level to validate
+     * @return The same isolation level when valid
+     * @throws DatabaseException If the isolation level is not a supported JDBC constant
      */
-    private boolean isKnownIsolationLevel(int isolationLevel) {
-        return isolationLevel == Connection.TRANSACTION_NONE
-                || isolationLevel == Connection.TRANSACTION_READ_UNCOMMITTED
-                || isolationLevel == Connection.TRANSACTION_READ_COMMITTED
-                || isolationLevel == Connection.TRANSACTION_REPEATABLE_READ
-                || isolationLevel == Connection.TRANSACTION_SERIALIZABLE;
+    private int normalizeIsolationLevel(int isolationLevel) {
+        return switch (isolationLevel) {
+            case Connection.TRANSACTION_NONE, Connection.TRANSACTION_READ_UNCOMMITTED,
+                 Connection.TRANSACTION_READ_COMMITTED, Connection.TRANSACTION_REPEATABLE_READ,
+                 Connection.TRANSACTION_SERIALIZABLE -> isolationLevel;
+            default -> throw new DatabaseException("Unsupported transaction isolation level: " + isolationLevel);
+        };
     }
 
     /**

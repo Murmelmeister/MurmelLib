@@ -1,6 +1,7 @@
 package de.murmelmeister.library.utils;
 
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Utility class for animating strings with effects such as bouncing and color cycling.
@@ -8,7 +9,9 @@ import java.util.List;
  * color codes, and a floating-point speed multiplier that influences the animation state.
  */
 public final class AnimationUtils {
-    private static final double NANOS_PER_TICK = 50_000_000D; // 1 / 20 seconds
+    private static final long NANOS_PER_TICK = TimeUnit.SECONDS.toNanos(1) / 20; // 1 / 20 seconds
+    private static final long PHASE_WRAP_TICKS = 1L << 20; // Wrap roughly every 14.6 hours to retain precision
+    private static final long PHASE_WRAP_MASK = PHASE_WRAP_TICKS - 1;
 
     private AnimationUtils() {
     }
@@ -24,7 +27,7 @@ public final class AnimationUtils {
      * @return The current phase value for the bounce animation
      */
     private static double bouncePhase(float speed) {
-        double ticks = System.nanoTime() / NANOS_PER_TICK;
+        double ticks = currentTickTime();
         return ticks * speed;
     }
 
@@ -37,11 +40,10 @@ public final class AnimationUtils {
      * @return The current phase value for color animations
      */
     private static double colorPhase(float speed) {
-        double ticks = System.nanoTime() / NANOS_PER_TICK;
         if (speed == 0F) return 0D;
+        double ticks = currentTickTime();
         double absSpeed = Math.abs(speed);
-        double ticksPerStep = 20D / absSpeed; // 1.0f -> 20 ticks, 2.0f -> 10 ticks, 0.5f -> 40 ticks
-        double phase = ticks / ticksPerStep;
+        double phase = ticks * absSpeed / 20D; // 1.0f -> 20 ticks, 2.0f -> 10 ticks, 0.5f -> 40 ticks
         return speed > 0 ? phase : -phase;
     }
 
@@ -154,5 +156,19 @@ public final class AnimationUtils {
     public static String animateFull(List<String> colors, String input, float speed) {
         String bounced = animateBounce(input, speed);
         return animatePerColorCycle(colors, bounced, speed);
+    }
+
+    /**
+     * Computes the current tick time with fractional precision, wrapping periodically to retain double accuracy.
+     *
+     * @return The current tick time in the range [0, PHASE_WRAP_TICKS) with fractional tick progress
+     */
+    private static double currentTickTime() {
+        long nanos = System.nanoTime();
+        long wholeTicks = nanos / NANOS_PER_TICK;
+        long wrappedTicks = wholeTicks & PHASE_WRAP_MASK;
+        long remainderNanos = nanos % NANOS_PER_TICK;
+        double fractional = remainderNanos / (double) NANOS_PER_TICK;
+        return wrappedTicks + fractional;
     }
 }

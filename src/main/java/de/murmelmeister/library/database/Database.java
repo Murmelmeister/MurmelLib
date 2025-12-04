@@ -43,7 +43,7 @@ public final class Database implements AutoCloseable {
      * @param config The configuration object for setting up the HikariCP data source
      * @throws DatabaseException If the connection setup fails, the lock cannot be acquired, or the thread is interrupted
      */
-    private void connect(HikariConfig config) {
+    public void connect(HikariConfig config) {
         try {
             if (!lock.writeLock().tryLock(10, TimeUnit.SECONDS))
                 throw new DatabaseException("Failed to acquire write lock for database connection setup. Another thread is currently configuring the database connection.");

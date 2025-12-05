@@ -6,6 +6,12 @@ import de.murmelmeister.library.exceptions.DatabaseException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.io.Reader;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.sql.*;
 import java.util.*;
 import java.util.concurrent.*;
@@ -573,6 +579,94 @@ public final class Database implements AutoCloseable {
     }
 
     /**
+     * Executes a SQL script from the given file path. The script is split on semicolons while respecting single and
+     * double-quoted strings as well as line and block comments. All statements are executed within a single
+     * transaction, rolling back entirely if any statement fails.
+     *
+     * @param scriptPath The path to the SQL script file
+     */
+    public void runSqlScript(Path scriptPath) {
+        Objects.requireNonNull(scriptPath, "scriptPath");
+
+        try (BufferedReader reader = Files.newBufferedReader(scriptPath, StandardCharsets.UTF_8)) {
+            runSqlScript(reader);
+        } catch (IOException e) {
+            throw new DatabaseException("Failed to read SQL script from " + scriptPath, e);
+        }
+    }
+
+    /**
+     * Executes a SQL script provided via {@link Reader}. Semicolons separate statements outside quoted
+     * strings. Line comments starting with {@code --} and block comments between {@code /*} and {@code *\/} are
+     * ignored. All statements run inside a single transaction.
+     *
+     * @param scriptReader The reader supplying the SQL script content
+     */
+    public void runSqlScript(Reader scriptReader) {
+        Objects.requireNonNull(scriptReader, "scriptReader");
+
+        executeInTransaction(connection -> {
+            try (BufferedReader reader = scriptReader instanceof BufferedReader ? (BufferedReader) scriptReader : new BufferedReader(scriptReader);
+                 Statement statement = connection.createStatement()) {
+                StringBuilder buffer = new StringBuilder();
+                boolean inSingleQuote = false;
+                boolean inDoubleQuote = false;
+                boolean inBlockComment = false;
+                boolean escape = false;
+
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    int length = line.length();
+                    for (int i = 0; i < length; i++) {
+                        char current = line.charAt(i);
+
+                        if (!inSingleQuote && !inDoubleQuote) {
+                            if (inBlockComment) {
+                                if (current == '*' && i + 1 < length && line.charAt(i + 1) == '/') {
+                                    inBlockComment = false;
+                                    i++;
+                                }
+                                continue;
+                            }
+
+                            if (current == '-' && i + 1 < length && line.charAt(i + 1) == '-')
+                                break;
+
+                            if (current == '/' && i + 1 < length && line.charAt(i + 1) == '*') {
+                                inBlockComment = true;
+                                i++;
+                                continue;
+                            }
+                        }
+
+                        if (!inDoubleQuote && current == '\'' && !escape)
+                            inSingleQuote = !inSingleQuote;
+                        else if (!inSingleQuote && current == '"' && !escape)
+                            inDoubleQuote = !inDoubleQuote;
+
+                        if (current == ';' && !inSingleQuote && !inDoubleQuote) {
+                            executeSqlStatement(statement, buffer);
+                            buffer.setLength(0);
+                            escape = false;
+                            continue;
+                        }
+
+                        buffer.append(current);
+                        escape = current == '\\' && !escape;
+                    }
+                    buffer.append('\n');
+                    escape = false;
+                }
+
+                executeSqlStatement(statement, buffer);
+                return null;
+            } catch (IOException e) {
+                throw new DatabaseException("Failed to read SQL script", e);
+            }
+        });
+    }
+
+    /**
      * Executes a database operation within a transactional context. This method manages the transaction lifecycle,
      * including beginning, committing, and rolling back the transaction if an exception occurs. It also ensures the
      * connection's state is properly restored after the operation.
@@ -825,6 +919,19 @@ public final class Database implements AutoCloseable {
             executorService.shutdownNow();
             Thread.currentThread().interrupt();
         }
+    }
+
+    /**
+     * Executes the SQL contained in the provided buffer if it is non-empty.
+     *
+     * @param statement The JDBC statement used for execution
+     * @param buffer    The buffer holding the SQL statement
+     * @throws SQLException If execution fails
+     */
+    private void executeSqlStatement(Statement statement, StringBuilder buffer) throws SQLException {
+        String sql = buffer.toString().trim();
+        if (!sql.isEmpty())
+            statement.execute(sql);
     }
 
     /**
